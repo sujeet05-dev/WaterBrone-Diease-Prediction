@@ -82,10 +82,15 @@ export default function Home() {
     e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>
   ) => {
     const { name, value } = e.target;
-    setFormData((prev) => ({
-      ...prev,
-      [name]: ["symptoms", "gender", "water_source"].includes(name) ? value : Number(value),
-    }));
+    setFormData((prev) => {
+      if (["symptoms", "gender", "water_source"].includes(name)) {
+        return { ...prev, [name]: value };
+      }
+      if (["age", "hygiene"].includes(name)) {
+        return { ...prev, [name]: Math.round(Number(value)) || 0 };
+      }
+      return { ...prev, [name]: Number(value) || 0 };
+    });
   };
 
   const handleReset = () => {
@@ -96,8 +101,8 @@ export default function Home() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!formData.symptoms.trim()) {
-      setError("Please describe symptoms before running the analysis.");
+    if (formData.symptoms.trim().length < 3) {
+      setError("Please describe symptoms in at least 3 characters before running the analysis.");
       return;
     }
     setLoading(true);
@@ -112,7 +117,11 @@ export default function Home() {
       });
       if (!res.ok) {
         const body = await res.json().catch(() => null);
-        throw new Error(body?.detail ?? `Server responded with ${res.status}`);
+        let errorMsg = `Server responded with ${res.status}`;
+        if (body?.detail) {
+          errorMsg = typeof body.detail === "string" ? body.detail : JSON.stringify(body.detail);
+        }
+        throw new Error(errorMsg);
       }
       const data: PredictionResponse = await res.json();
       setResult(data);
