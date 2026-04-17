@@ -1,7 +1,8 @@
-﻿streamlit
+fastapi
+uvicorn[standard]
+pydantic
+python-multipart
 tensorflow
 numpy
-pandas
 scikit-learn
 joblib
-plotly
