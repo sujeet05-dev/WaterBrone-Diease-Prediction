@@ -17,6 +17,20 @@ type PredictionResponse = {
   probabilities: DiseaseProbability[];
 };
 
+type ExtractedField = {
+  value: string | number;
+  source: "extracted" | "default";
+};
+
+type ImagePredictionResponse = {
+  disease: string;
+  confidence: number;
+  probabilities: DiseaseProbability[];
+  extracted_data: Record<string, ExtractedField>;
+};
+
+type InputMode = "manual" | "image";
+
 // ---------------------------------------------------------------------------
 // Scroll-reveal wrapper (IntersectionObserver)
 // ---------------------------------------------------------------------------
@@ -72,11 +86,44 @@ const DEFAULT_FORM = {
 // ---------------------------------------------------------------------------
 // Component
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Friendly labels for extracted fields
+// ---------------------------------------------------------------------------
+const FIELD_LABELS: Record<string, string> = {
+  symptoms: "Symptoms",
+  sodium: "Sodium (mmol/L)",
+  potassium: "Potassium (mmol/L)",
+  chloride: "Chloride (mmol/L)",
+  wbc: "WBC (×10⁹/L)",
+  hemoglobin: "Hemoglobin (g/dL)",
+  platelets: "Platelets (×10⁹/L)",
+  urea: "Urea (mg/dL)",
+  creatinine: "Creatinine (mg/dL)",
+  bilirubin: "Bilirubin (mg/dL)",
+  alt: "ALT (U/L)",
+  ast: "AST (U/L)",
+  age: "Age",
+  gender: "Gender",
+  hygiene: "Hygiene Score",
+  water_source: "Water Source",
+};
+
 export default function Home() {
+  // Shared state
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<PredictionResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [inputMode, setInputMode] = useState<InputMode>("manual");
+
+  // Manual entry state
   const [formData, setFormData] = useState(DEFAULT_FORM);
+
+  // Image upload state
+  const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [imagePreview, setImagePreview] = useState<string | null>(null);
+  const [extractedData, setExtractedData] = useState<Record<string, ExtractedField> | null>(null);
+  const [isDragging, setIsDragging] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const handleChange = (
     e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>
@@ -97,8 +144,20 @@ export default function Home() {
     setFormData(DEFAULT_FORM);
     setResult(null);
     setError(null);
+    setSelectedFile(null);
+    setImagePreview(null);
+    setExtractedData(null);
   };
 
+  // --- Mode switch ---
+  const switchMode = (mode: InputMode) => {
+    setInputMode(mode);
+    setResult(null);
+    setError(null);
+    setExtractedData(null);
+  };
+
+  // --- Manual submit ---
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (formData.symptoms.trim().length < 3) {
@@ -134,6 +193,84 @@ export default function Home() {
     }
   };
 
+  // --- Image file handling ---
+  const processFile = (file: File) => {
+    const allowed = ["image/jpeg", "image/png", "image/webp", "image/jpg"];
+    if (!allowed.includes(file.type)) {
+      setError("Unsupported file type. Please upload a JPEG, PNG, or WebP image.");
+      return;
+    }
+    if (file.size > 10 * 1024 * 1024) {
+      setError("Image is too large. Maximum size is 10 MB.");
+      return;
+    }
+    setError(null);
+    setSelectedFile(file);
+    setExtractedData(null);
+    setResult(null);
+    const reader = new FileReader();
+    reader.onload = (ev) => setImagePreview(ev.target?.result as string);
+    reader.readAsDataURL(file);
+  };
+
+  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files?.[0]) processFile(e.target.files[0]);
+  };
+
+  const handleDragOver = (e: React.DragEvent) => { e.preventDefault(); setIsDragging(true); };
+  const handleDragLeave = (e: React.DragEvent) => { e.preventDefault(); setIsDragging(false); };
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragging(false);
+    if (e.dataTransfer.files?.[0]) processFile(e.dataTransfer.files[0]);
+  };
+
+  const removeImage = () => {
+    setSelectedFile(null);
+    setImagePreview(null);
+    setExtractedData(null);
+    setResult(null);
+    if (fileInputRef.current) fileInputRef.current.value = "";
+  };
+
+  // --- Image submit ---
+  const handleImageSubmit = async () => {
+    if (!selectedFile) {
+      setError("Please select or drop an image first.");
+      return;
+    }
+    setLoading(true);
+    setError(null);
+    setResult(null);
+    setExtractedData(null);
+
+    try {
+      const fd = new FormData();
+      fd.append("file", selectedFile);
+      const res = await fetch("http://127.0.0.1:8000/predict-from-image", {
+        method: "POST",
+        body: fd,
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => null);
+        let errorMsg = `Server responded with ${res.status}`;
+        if (body?.detail) {
+          errorMsg = typeof body.detail === "string" ? body.detail : JSON.stringify(body.detail);
+        }
+        throw new Error(errorMsg);
+      }
+      const data: ImagePredictionResponse = await res.json();
+      setResult({ disease: data.disease, confidence: data.confidence, probabilities: data.probabilities });
+      setExtractedData(data.extracted_data);
+      setTimeout(() => document.getElementById("extracted-data")?.scrollIntoView({ behavior: "smooth" }), 300);
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      setError(`Image prediction failed — ${message}. Make sure the FastAPI server is running and GEMINI_API_KEY is set.`);
+    } finally {
+      setLoading(false);
+    }
+  };
+
   return (
     <>
       {/* ----- Hero ----- */}
@@ -158,7 +295,24 @@ export default function Home() {
       </section>
 
       <div className="container" id="prediction-form" style={{ paddingTop: "5rem" }}>
-        {/* ----- Prediction Form ----- */}
+        {/* ----- Mode Tabs ----- */}
+        <div className="mode-tabs">
+          <button
+            className={`mode-tab ${inputMode === "manual" ? "active" : ""}`}
+            onClick={() => switchMode("manual")}
+          >
+            ✏️ Manual Entry
+          </button>
+          <button
+            className={`mode-tab ${inputMode === "image" ? "active" : ""}`}
+            onClick={() => switchMode("image")}
+          >
+            📷 Upload Report Image
+          </button>
+        </div>
+
+        {/* ----- Manual Prediction Form ----- */}
+        {inputMode === "manual" && (
         <FadeInSection>
           <form onSubmit={handleSubmit} className="glass-card">
             {/* Symptoms */}
@@ -284,6 +438,122 @@ export default function Home() {
             </div>
           </form>
         </FadeInSection>
+        )}
+
+        {/* ----- Image Upload Form ----- */}
+        {inputMode === "image" && (
+        <FadeInSection>
+          <div className="glass-card">
+            <h2 className="section-title">📷 Upload Lab Report Image</h2>
+            <p style={{ marginBottom: "1.5rem", opacity: 0.8, lineHeight: 1.6 }}>
+              Upload a photo of a medical lab report or patient form. Our AI (powered by Gemini Vision) will automatically
+              extract symptoms, lab values, and patient information — then predict the disease instantly.
+            </p>
+
+            {/* Drop Zone */}
+            <div
+              className={`drop-zone ${isDragging ? "dragging" : ""} ${imagePreview ? "has-image" : ""}`}
+              onDragOver={handleDragOver}
+              onDragLeave={handleDragLeave}
+              onDrop={handleDrop}
+              onClick={() => !imagePreview && fileInputRef.current?.click()}
+            >
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="image/jpeg,image/png,image/webp"
+                onChange={handleFileSelect}
+                style={{ display: "none" }}
+                id="image-upload"
+              />
+
+              {imagePreview ? (
+                <div className="image-preview-wrapper">
+                  <img src={imagePreview} alt="Lab report preview" className="image-preview" />
+                  <button
+                    type="button"
+                    className="remove-image-btn"
+                    onClick={(e) => { e.stopPropagation(); removeImage(); }}
+                    title="Remove image"
+                  >
+                    ✕
+                  </button>
+                  <div className="image-file-name">
+                    📄 {selectedFile?.name} ({((selectedFile?.size || 0) / 1024).toFixed(1)} KB)
+                  </div>
+                </div>
+              ) : (
+                <div className="drop-zone-content">
+                  <div className="drop-zone-icon">📤</div>
+                  <p className="drop-zone-text">Drag & drop your lab report image here</p>
+                  <p className="drop-zone-subtext">or click to browse files</p>
+                  <p className="drop-zone-formats">Supported: JPEG, PNG, WebP · Max 10 MB</p>
+                </div>
+              )}
+            </div>
+
+            {/* Error display */}
+            {error && (
+              <div style={{ color: "#ef4444", padding: "1rem", background: "#ffeef0", borderRadius: 12, marginTop: "2rem", border: "1px solid #ef4444" }}>
+                <strong>⚠ </strong> {error}
+              </div>
+            )}
+
+            {/* Action buttons */}
+            <div style={{ display: "flex", gap: "1rem", marginTop: "2rem" }}>
+              <button
+                type="button"
+                className="btn-primary"
+                disabled={loading || !selectedFile}
+                onClick={handleImageSubmit}
+              >
+                {loading ? <div className="loader" /> : "🔬 Analyse Report & Predict"}
+              </button>
+              <button
+                type="button"
+                onClick={handleReset}
+                style={{
+                  padding: "1rem 2rem", border: "2px solid var(--primary-color)",
+                  borderRadius: 15, background: "transparent", color: "var(--text-main)",
+                  fontWeight: 700, fontSize: "1.1rem", cursor: "pointer", fontFamily: "inherit",
+                  transition: "all 0.3s ease", whiteSpace: "nowrap",
+                }}
+              >
+                ↺ Reset
+              </button>
+            </div>
+          </div>
+        </FadeInSection>
+        )}
+
+        {/* ----- Extracted Data (Image mode) ----- */}
+        {extractedData && (
+          <FadeInSection>
+            <div id="extracted-data" className="glass-card">
+              <h2 className="section-title">🔎 Extracted Data from Report</h2>
+              <p style={{ marginBottom: "1.5rem", opacity: 0.8 }}>
+                The following values were extracted from the uploaded image. Fields marked as
+                <span className="badge badge-extracted" style={{ marginLeft: 6 }}>Extracted</span> were found in the report;
+                <span className="badge badge-default" style={{ marginLeft: 6 }}>Default</span> values were used where data was not visible.
+              </p>
+              <div className="extracted-grid">
+                {Object.entries(extractedData).map(([key, field]) => (
+                  <div key={key} className={`extracted-item ${field.source}`}>
+                    <div className="extracted-label">{FIELD_LABELS[key] || key}</div>
+                    <div className="extracted-value">
+                      {typeof field.value === "string" && field.value.length > 60
+                        ? field.value.substring(0, 60) + "…"
+                        : String(field.value)}
+                    </div>
+                    <span className={`badge badge-${field.source}`}>
+                      {field.source === "extracted" ? "✓ Extracted" : "⊘ Default"}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </FadeInSection>
+        )}
 
         {/* ----- Results ----- */}
         {result && (
